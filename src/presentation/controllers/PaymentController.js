@@ -53,7 +53,8 @@ export class PaymentController {
     vnp_Params['vnp_TmnCode'] = config.vnpay.tmnCode;
     vnp_Params['vnp_Locale'] = 'vn';
     vnp_Params['vnp_CurrCode'] = 'VND';
-    vnp_Params['vnp_TxnRef'] = orderId;
+    // Append timestamp to ensure vnp_TxnRef is globally unique for VNPay sandbox
+    vnp_Params['vnp_TxnRef'] = `${orderId}_${Date.now()}`;
     vnp_Params['vnp_OrderInfo'] = orderInfo || `Thanh toan don hang ${orderId}`;
     vnp_Params['vnp_OrderType'] = 'other';
     vnp_Params['vnp_Amount'] = amount * 100;
@@ -106,7 +107,8 @@ export class PaymentController {
     const signed = hmac.update(Buffer.from(signData, 'utf-8')).digest('hex');
 
     if (secureHash === signed) {
-      const orderId = vnp_Params['vnp_TxnRef'];
+      const txnRef = vnp_Params['vnp_TxnRef'];
+      const orderId = txnRef.includes('_') ? txnRef.split('_')[0] : txnRef;
       const rspCode = vnp_Params['vnp_ResponseCode'];
       const amount = parseInt(vnp_Params['vnp_Amount'], 10) / 100;
 
