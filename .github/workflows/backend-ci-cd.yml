@@ -1,0 +1,174 @@
+name: Build & Deploy Backend
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  DOCKER_CACHE_SCOPE: movie-theater-backend
+
+jobs:
+  verify:
+    name: Verify Backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Check syntax and run backend tests
+        run: npm run check
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Verify production Docker image builds
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: movie-theater-api:verify
+          cache-from: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+
+  build-and-push:
+    name: Build & Push GHCR Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Normalize GHCR image name
+        id: image
+        shell: bash
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and OCI labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=Movie Theater Fastify API
+            org.opencontainers.image.description=Movie Theater backend service
+
+      - name: Build and push production image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ env.DOCKER_CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.DOCKER_CACHE_SCOPE }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Publish image summary
+        shell: bash
+        run: |
+          {
+            echo "### Docker image published"
+            echo "- Image: \`${{ steps.image.outputs.name }}\`"
+            echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- Tags: \`latest\` and \`sha-${GITHUB_SHA::7}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to Coolify Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate Coolify secrets
+        shell: bash
+        env:
+          COOLIFY_WEBHOOK_URL: ${{ secrets.COOLIFY_WEBHOOK_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [[ -z "$COOLIFY_WEBHOOK_URL" || -z "$COOLIFY_TOKEN" ]]; then
+            echo "COOLIFY_WEBHOOK_URL and COOLIFY_TOKEN must be configured in the production environment." >&2
+            exit 1
+          fi
+
+      - name: Trigger Coolify deployment
+        shell: bash
+        env:
+          COOLIFY_WEBHOOK_URL: ${{ secrets.COOLIFY_WEBHOOK_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --request GET \
+            "$COOLIFY_WEBHOOK_URL" \
+            --header "Authorization: Bearer $COOLIFY_TOKEN"
+
+      - name: Publish deployment summary
+        shell: bash
+        run: |
+          {
+            echo "### Coolify deployment triggered"
+            echo "- Image: \`${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}\`"
+            echo "- Port: \`5550\`"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

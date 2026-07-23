@@ -1,0 +1,99 @@
+name: movie-theater
+
+x-api-environment: &api-environment
+  NODE_ENV: production
+  MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in .env.docker}:${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env.docker}@mongo:27017/${MONGO_DB_NAME:-movie_theater}?authSource=admin
+  MONGODB_DB_NAME: ${MONGO_DB_NAME:-movie_theater}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-api-image: &api-image
+  image: ${API_IMAGE:-movie-theater-api:latest}
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in .env.docker}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in .env.docker}
+      MONGO_INITDB_DATABASE: ${MONGO_DB_NAME:-movie_theater}
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet
+          --username "$${MONGO_INITDB_ROOT_USERNAME}"
+          --password "$${MONGO_INITDB_ROOT_PASSWORD}"
+          --authenticationDatabase admin
+          --eval "quit(db.adminCommand('ping').ok ? 0 : 2)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  db-init:
+    <<: *api-image
+    restart: "no"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      <<: *api-environment
+    command: ["npm", "run", "db:setup"]
+    networks:
+      - backend
+
+  api:
+    <<: *api-image
+    restart: unless-stopped
+    init: true
+    depends_on:
+      mongo:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    ports:
+      - "${API_PORT:-5550}:5550"
+    environment:
+      <<: *api-environment
+      PORT: 5550
+      HOST: 0.0.0.0
+      RUN_MIGRATIONS: "false"
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      AUTH_TOKEN_SECRET: ${AUTH_TOKEN_SECRET:?Set AUTH_TOKEN_SECRET in .env.docker}
+      AUTH_TOKEN_LIFETIME_SECONDS: ${AUTH_TOKEN_LIFETIME_SECONDS:-28800}
+      AUTH_REFRESH_TOKEN_LIFETIME_SECONDS: ${AUTH_REFRESH_TOKEN_LIFETIME_SECONDS:-2592000}
+      UPLOAD_DIR: /app/uploads
+      MAX_IMAGE_UPLOAD_BYTES: ${MAX_IMAGE_UPLOAD_BYTES:-5242880}
+    volumes:
+      - uploads_data:/app/uploads
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:5550/health')
+          .then(r=>{if(!r.ok)process.exit(1)})
+          .catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  mongo_data:
+  uploads_data:
+
+networks:
+  backend:
+    driver: bridge
