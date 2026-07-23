@@ -20,7 +20,11 @@ export function registerPaymentRoutes(fastify, controller, auth) {
       response: {
         200: {
           description: 'Successfully created VNPay payment URL',
-          type: 'object'
+          type: 'object',
+          properties: {
+            paymentUrl: { type: 'string' },
+            orderId: { type: 'string' }
+          }
         },
         ...errorResponses(),
       }
@@ -36,7 +40,11 @@ export function registerPaymentRoutes(fastify, controller, auth) {
       response: {
         200: {
           description: 'Successfully handled IPN webhook',
-          type: 'object'
+          type: 'object',
+          properties: {
+            RspCode: { type: 'string' },
+            Message: { type: 'string' }
+          }
         },
         ...errorResponses(),
       }
